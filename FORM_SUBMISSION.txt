@@ -1,0 +1,5 @@
+Project Title: GAME HUB (CLI + raylib)
+
+Description: Linux-style terminal shell (login, ASCII banner, player@hub:~$, help/ls/status) launches raylib graphics windows for eight games: Connect Four, Blackjack, Snakes & Ladders, Ludo, Snake, Word, Candy match-3, Mini Golf. Scores saved to file. Multi-file C99 with structs, union, macros, pointers, and modular design.
+
+Topics: variables, control flow, functions, arrays, strings, pointers, structs, union, macros, headers, file I/O, multi-file project; graphics with raylib (approved).
