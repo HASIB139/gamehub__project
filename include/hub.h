@@ -89,4 +89,6 @@ void lb_print_all(void);
 int auth_login(char *name_out, int size);
 int auth_change_password(const char *name);
 
+int gfx_pick_players(const char *game, const char *p1keys, const char *p2keys);
+
 #endif

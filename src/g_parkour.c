@@ -3,6 +3,7 @@
 #define GRAV      1700.0f
 #define JUMP_V     640.0f
 #define RUN_X      220.0f
+#define RUN2_X     290.0f
 #define RUN_W       28.0f
 #define STAND_H     44.0f
 #define SLIDE_H     24.0f
@@ -31,21 +32,28 @@ typedef struct {
 typedef struct { float x, y, vx, vy, life; } Dust;
 
 typedef struct {
-    Plat  pl[MAXP];
-    Dust  dust[MAXD];
-    float feet, vy;
-    float dist, speed;
-    float score_px;
-    float slide_t;
-    float shake, runtime;
-    int   onground, jumps, dead, saved;
+    int jump, slide;
+} PlayerInput;
 
-    int   shield;
-    float dash_t, slow_t, wings_t, x2_t;
-    float invuln_t;
-    int   popup;
-    float popup_t;
+typedef struct {
+    float x, feet, vy;
+    float slide_t, score_px;
+    float wings_t, x2_t, invuln_t, popup_t;
+    int   onground, jumps, dead, shield, popup;
+} Runner;
+
+typedef struct {
+    Plat   pl[MAXP];
+    Dust   dust[MAXD];
+    Runner r[2];
+    int    players, saved;
+    float  dist, speed;
+    float  dash_t, slow_t;
+    float  shake, runtime;
 } Run;
+
+static const Color SHIRT[2] = { { 255, 120, 60, 255 }, { 70, 150, 255, 255 } };
+static const Color SCARF[2] = { { 230, 50, 60, 255 }, { 255, 220, 80, 255 } };
 
 static Color pu_color(int t) {
     switch (t) {
@@ -116,7 +124,7 @@ static void draw_pickup_icon(int t, float cx, float cy, float r) {
     }
 }
 
-static void spawn(Plat *pl, const Plat *prev, float speed, int allow_obs) {
+static void spawn(Plat *pl, const Plat *prev, float speed, int allow_obs, int two) {
     float gap_max = speed * 0.45f;
     if (gap_max < 100.0f) gap_max = 100.0f;
     float gap = (float)GetRandomValue(70, (int)gap_max);
@@ -157,8 +165,11 @@ static void spawn(Plat *pl, const Plat *prev, float speed, int allow_obs) {
             if (pl->obs == 2) from = pl->off + 56.0f + 70.0f;
             if (to > from) {
                 int r = GetRandomValue(0, 99);
-                pl->pu = (r < 22) ? PU_SHIELD : (r < 34) ? PU_DASH : (r < 52) ? PU_SLOW :
-                         (r < 72) ? PU_WINGS : (r < 90) ? PU_X2 : PU_GEM;
+                if (two)
+                    pl->pu = (r < 30) ? PU_SHIELD : (r < 60) ? PU_WINGS : (r < 85) ? PU_X2 : PU_GEM;
+                else
+                    pl->pu = (r < 22) ? PU_SHIELD : (r < 34) ? PU_DASH : (r < 52) ? PU_SLOW :
+                             (r < 72) ? PU_WINGS : (r < 90) ? PU_X2 : PU_GEM;
                 pl->pu_off = from + (float)GetRandomValue(0, (int)(to - from));
                 pl->pu_y = (float)GetRandomValue(70, 110);
             }
@@ -166,14 +177,39 @@ static void spawn(Plat *pl, const Plat *prev, float speed, int allow_obs) {
     }
 }
 
-static void reset_run(Run *g) {
+static void reset_run(Run *g, int players) {
     memset(g, 0, sizeof *g);
+    g->players = players;
     g->pl[0] = (Plat){ -60, SH * 0.68f, 560, 0, 0, 7, PU_NONE, 0, 0 };
     g->speed = 300.0f;
     for (int i = 1; i < MAXP; i++)
-        spawn(&g->pl[i], &g->pl[i - 1], g->speed, i > 2);
-    g->feet = g->pl[0].y;
-    g->onground = 1;
+        spawn(&g->pl[i], &g->pl[i - 1], g->speed, i > 2, players == 2);
+    g->r[0].x = RUN_X;
+    g->r[1].x = RUN2_X;
+    for (int i = 0; i < 2; i++) {
+        g->r[i].feet = g->pl[0].y;
+        g->r[i].onground = 1;
+    }
+}
+
+static int all_dead(const Run *g) {
+    for (int i = 0; i < g->players; i++)
+        if (!g->r[i].dead) return 0;
+    return 1;
+}
+
+static void read_player1_input(PlayerInput *in, int players) {
+    in->jump = IsKeyPressed(KEY_UP);
+    in->slide = IsKeyPressed(KEY_DOWN);
+    if (players == 1) {
+        in->jump |= IsKeyPressed(KEY_SPACE) | IsKeyPressed(KEY_W);
+        in->slide |= IsKeyPressed(KEY_S);
+    }
+}
+
+static void read_player2_input(PlayerInput *in) {
+    in->jump = IsKeyPressed(KEY_W);
+    in->slide = IsKeyPressed(KEY_S);
 }
 
 static void add_dust(Run *g, float x, float y, int n) {
@@ -196,143 +232,158 @@ static void update_dust(Run *g, float dt) {
     }
 }
 
-static void die(Run *g) {
-    if (g->dead) return;
-    g->dead = 1;
+static void die(Run *g, Runner *r) {
+    if (r->dead) return;
+    r->dead = 1;
     g->shake = 14.0f;
-    fx_burst(RUN_X + RUN_W / 2, fminf(g->feet - 20.0f, SH - 40.0f), ORANGE, 40);
+    fx_burst(r->x + RUN_W / 2, fminf(r->feet - 20.0f, SH - 40.0f), ORANGE, 40);
 }
 
-static int absorb_hit(Run *g) {
-    if (g->dash_t > 0 || g->invuln_t > 0) return 1;
-    if (g->shield) {
-        g->shield = 0;
-        g->invuln_t = 1.2f;
+static int absorb_hit(Run *g, Runner *r) {
+    if (g->dash_t > 0 || r->invuln_t > 0) return 1;
+    if (r->shield) {
+        r->shield = 0;
+        r->invuln_t = 1.2f;
         g->shake = 8.0f;
-        fx_burst(RUN_X + RUN_W / 2, g->feet - 20.0f, SKYBLUE, 25);
+        fx_burst(r->x + RUN_W / 2, r->feet - 20.0f, SKYBLUE, 25);
         return 1;
     }
     return 0;
 }
 
-static void grab(Run *g, int type) {
+static void grab(Run *g, Runner *r, int type) {
     switch (type) {
-    case PU_SHIELD: g->shield = 1;               break;
-    case PU_DASH:   g->dash_t = DASH_TIME;       break;
-    case PU_SLOW:   g->slow_t = SLOW_TIME;       break;
-    case PU_WINGS:  g->wings_t = WINGS_TIME;     break;
-    case PU_X2:     g->x2_t = X2_TIME;           break;
-    default:        g->score_px += GEM_METERS * 40.0f; break;
+    case PU_SHIELD: r->shield = 1;                break;
+    case PU_DASH:   g->dash_t = DASH_TIME;        break;
+    case PU_SLOW:   g->slow_t = SLOW_TIME;        break;
+    case PU_WINGS:  r->wings_t = WINGS_TIME;      break;
+    case PU_X2:     r->x2_t = X2_TIME;            break;
+    default:        r->score_px += GEM_METERS * 40.0f; break;
     }
-    g->popup = type;
-    g->popup_t = 1.0f;
-    fx_burst(RUN_X + RUN_W / 2, g->feet - 30.0f, pu_color(type), 18);
+    r->popup = type;
+    r->popup_t = 1.0f;
+    fx_burst(r->x + RUN_W / 2, r->feet - 30.0f, pu_color(type), 18);
+}
+
+static void tick(float *t, float dt) {
+    if (*t > 0) {
+        *t -= dt;
+        if (*t < 0) *t = 0;
+    }
 }
 
 static void update_effects(Run *g, float dt) {
-    if (g->dash_t > 0 && g->dash_t - dt <= 0) g->invuln_t = 0.8f;
-    float *timers[] = { &g->dash_t, &g->slow_t, &g->wings_t, &g->x2_t, &g->invuln_t, &g->popup_t };
-    for (int i = 0; i < 6; i++)
-        if (*timers[i] > 0) {
-            *timers[i] -= dt;
-            if (*timers[i] < 0) *timers[i] = 0;
-        }
+    if (g->dash_t > 0 && g->dash_t - dt <= 0) g->r[0].invuln_t = 0.8f;
+    tick(&g->dash_t, dt);
+    tick(&g->slow_t, dt);
+    for (int i = 0; i < g->players; i++) {
+        Runner *r = &g->r[i];
+        tick(&r->wings_t, dt);
+        tick(&r->x2_t, dt);
+        tick(&r->invuln_t, dt);
+        tick(&r->popup_t, dt);
+    }
 }
 
-static void update_run(Run *g, float dt) {
+static void update_runner(Run *g, Runner *r, const PlayerInput *in, float move, float dt) {
+    r->score_px += move * ((r->x2_t > 0) ? 2.0f : 1.0f);
 
-    g->speed = 300.0f + g->dist * 0.015f;
-    if (g->speed > 640.0f) g->speed = 640.0f;
-    float move = g->speed * ((g->dash_t > 0) ? 1.5f : 1.0f) * dt;
-    g->dist += move;
-    g->score_px += move * ((g->x2_t > 0) ? 2.0f : 1.0f);
-    g->runtime += dt;
-
-    for (int i = 0; i < MAXP; i++) g->pl[i].x -= move;
-    if (g->pl[0].x + g->pl[0].w < -80) {
-        for (int i = 0; i < MAXP - 1; i++) g->pl[i] = g->pl[i + 1];
-        spawn(&g->pl[MAXP - 1], &g->pl[MAXP - 2], g->speed, 1);
+    int max_jumps = (r->wings_t > 0) ? 3 : 2;
+    if (in->jump && r->jumps < max_jumps) {
+        r->vy = -JUMP_V;
+        r->jumps++;
+        r->onground = 0;
+        r->slide_t = 0;
+        add_dust(g, r->x + RUN_W / 2, r->feet, 6);
     }
+    if (in->slide && r->onground) r->slide_t = SLIDE_TIME;
+    if (r->slide_t > 0) r->slide_t -= dt;
 
-    int max_jumps = (g->wings_t > 0) ? 3 : 2;
-    if ((IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W)) && g->jumps < max_jumps) {
-        g->vy = -JUMP_V;
-        g->jumps++;
-        g->onground = 0;
-        g->slide_t = 0;
-        add_dust(g, RUN_X + RUN_W / 2, g->feet, 6);
-    }
-    if ((IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S)) && g->onground) g->slide_t = SLIDE_TIME;
-    if (g->slide_t > 0) g->slide_t -= dt;
-
-    int was_on = g->onground;
-    float prev_feet = g->feet;
-    g->vy += GRAV * dt;
-    float hit_v = g->vy;
-    g->feet += g->vy * dt;
+    int was_on = r->onground;
+    float prev_feet = r->feet;
+    r->vy += GRAV * dt;
+    float hit_v = r->vy;
+    r->feet += r->vy * dt;
 
     int landed = 0;
     for (int i = 0; i < MAXP; i++) {
         Plat *q = &g->pl[i];
-        if (!(RUN_X + RUN_W > q->x && RUN_X < q->x + q->w)) continue;
-        if (g->vy >= 0 && prev_feet <= q->y + 12.0f && g->feet >= q->y) {
-            g->feet = q->y;
-            g->vy = 0;
+        if (!(r->x + RUN_W > q->x && r->x < q->x + q->w)) continue;
+        if (r->vy >= 0 && prev_feet <= q->y + 12.0f && r->feet >= q->y) {
+            r->feet = q->y;
+            r->vy = 0;
             landed = 1;
-        } else if (g->feet > q->y + 16.0f) {
-            if (absorb_hit(g)) {
-                g->feet = q->y;
-                g->vy = 0;
+        } else if (r->feet > q->y + 16.0f) {
+            if (absorb_hit(g, r)) {
+                r->feet = q->y;
+                r->vy = 0;
                 landed = 1;
             } else {
-                die(g);
+                die(g, r);
             }
         }
     }
 
     if (landed && !was_on) {
-        add_dust(g, RUN_X + RUN_W / 2, g->feet, 7);
+        add_dust(g, r->x + RUN_W / 2, r->feet, 7);
         if (hit_v > 600.0f) g->shake = 3.0f;
     }
     if (landed && (int)(g->runtime * 12.0f) != (int)((g->runtime - dt) * 12.0f))
-        add_dust(g, RUN_X + 4, g->feet, 1);
+        add_dust(g, r->x + 4, r->feet, 1);
 
-    g->onground = landed;
-    if (landed) g->jumps = 0;
-    else if (was_on) g->jumps = 1;
-    if (!landed) g->slide_t = 0;
+    r->onground = landed;
+    if (landed) r->jumps = 0;
+    else if (was_on) r->jumps = 1;
+    if (!landed) r->slide_t = 0;
 
-    if (g->feet > SH + 80) die(g);
+    if (r->feet > SH + 80) die(g, r);
 
-    float h = (g->slide_t > 0) ? SLIDE_H : STAND_H;
+    float h = (r->slide_t > 0) ? SLIDE_H : STAND_H;
 
-    Rectangle body = { RUN_X, g->feet - h, RUN_W, h };
+    Rectangle body = { r->x, r->feet - h, RUN_W, h };
     for (int i = 0; i < MAXP; i++) {
         Plat *q = &g->pl[i];
         if (q->pu == PU_NONE) continue;
         Vector2 c = { q->x + q->pu_off, q->y - q->pu_y };
         if (CheckCollisionCircleRec(c, 18.0f, body)) {
-            grab(g, q->pu);
+            grab(g, r, q->pu);
             q->pu = PU_NONE;
         }
     }
 
-    Rectangle me = { RUN_X + 5, g->feet - h + 3, RUN_W - 10, h - 3 };
+    Rectangle me = { r->x + 5, r->feet - h + 3, RUN_W - 10, h - 3 };
     for (int i = 0; i < MAXP; i++) {
         Plat *q = &g->pl[i];
-        Rectangle r;
-        if (q->obs == 1)      r = (Rectangle){ q->x + q->off, q->y - 40, 36, 40 };
-        else if (q->obs == 2) r = (Rectangle){ q->x + q->off, 58, 56, q->y - 30 - 58 };
+        Rectangle o;
+        if (q->obs == 1)      o = (Rectangle){ q->x + q->off, q->y - 40, 36, 40 };
+        else if (q->obs == 2) o = (Rectangle){ q->x + q->off, 58, 56, q->y - 30 - 58 };
         else continue;
-        if (CheckCollisionRecs(me, r)) {
-            if (absorb_hit(g)) {
-                fx_burst(r.x + r.width / 2, r.y + r.height / 2, ORANGE, 12);
+        if (CheckCollisionRecs(me, o)) {
+            if (absorb_hit(g, r)) {
+                fx_burst(o.x + o.width / 2, o.y + o.height / 2, ORANGE, 12);
                 q->obs = 0;
             } else {
-                die(g);
+                die(g, r);
             }
         }
     }
+}
+
+static void update_players(Run *g, const PlayerInput *in1, const PlayerInput *in2, float dt) {
+    g->speed = 300.0f + g->dist * 0.015f;
+    if (g->speed > 640.0f) g->speed = 640.0f;
+    float move = g->speed * ((g->dash_t > 0) ? 1.5f : 1.0f) * dt;
+    g->dist += move;
+    g->runtime += dt;
+
+    for (int i = 0; i < MAXP; i++) g->pl[i].x -= move;
+    if (g->pl[0].x + g->pl[0].w < -80) {
+        for (int i = 0; i < MAXP - 1; i++) g->pl[i] = g->pl[i + 1];
+        spawn(&g->pl[MAXP - 1], &g->pl[MAXP - 2], g->speed, 1, g->players == 2);
+    }
+
+    for (int i = 0; i < g->players; i++)
+        if (!g->r[i].dead) update_runner(g, &g->r[i], (i == 0) ? in1 : in2, move, dt);
 }
 
 static void draw_city(float dist, float factor, int bw, int base_h, Color col, int windows) {
@@ -351,31 +402,36 @@ static void draw_city(float dist, float factor, int bw, int base_h, Color col, i
     }
 }
 
-static void draw_runner(const Run *g) {
+static void draw_runner(const Run *g, const Runner *r, int who) {
     float t = g->runtime;
-    Color shirt = { 255, 120, 60, 255 }, skin = { 245, 205, 170, 255 };
-    Color pants = { 40, 44, 70, 255 }, scarf = { 230, 50, 60, 255 };
+    Color shirt = SHIRT[who], scarf = SCARF[who];
+    Color skin = { 245, 205, 170, 255 }, pants = { 40, 44, 70, 255 };
+    float x = r->x;
 
-    if (g->onground)
-        DrawEllipse((int)(RUN_X + RUN_W / 2), (int)g->feet + 1, 16, 4, Fade(BLACK, 0.3f));
+    if (r->onground)
+        DrawEllipse((int)(x + RUN_W / 2), (int)r->feet + 1, 16, 4, Fade(BLACK, 0.3f));
 
-    if (g->slide_t > 0) {
+    if (g->players == 2) {
+        float tag_y = r->feet - ((r->slide_t > 0) ? SLIDE_H : STAND_H) - 20.0f;
+        DrawText(who == 0 ? "P1" : "P2", (int)(x + RUN_W / 2 - 8), (int)tag_y, 16, shirt);
+    }
 
-        float y = g->feet;
-        DrawLineEx((Vector2){ RUN_X + 22, y - 9 }, (Vector2){ RUN_X + 44, y - 5 }, 6, pants);
-        DrawRectangleRounded((Rectangle){ RUN_X - 4, y - 18, 30, 14 }, 0.5f, 6, shirt);
-        DrawCircleV((Vector2){ RUN_X - 4, y - 15 }, 8, skin);
-        DrawLineEx((Vector2){ RUN_X - 8, y - 18 }, (Vector2){ RUN_X - 28, y - 18 + sinf(t * 14.0f) * 4.0f }, 4, scarf);
+    if (r->slide_t > 0) {
+        float y = r->feet;
+        DrawLineEx((Vector2){ x + 22, y - 9 }, (Vector2){ x + 44, y - 5 }, 6, pants);
+        DrawRectangleRounded((Rectangle){ x - 4, y - 18, 30, 14 }, 0.5f, 6, shirt);
+        DrawCircleV((Vector2){ x - 4, y - 15 }, 8, skin);
+        DrawLineEx((Vector2){ x - 8, y - 18 }, (Vector2){ x - 28, y - 18 + sinf(t * 14.0f) * 4.0f }, 4, scarf);
         return;
     }
 
-    float top = g->feet - STAND_H;
-    float hx = RUN_X + RUN_W / 2;
+    float top = r->feet - STAND_H;
+    float hx = x + RUN_W / 2;
     float hip = top + 34;
-    float a = g->onground ? sinf(t * 20.0f) * 0.9f : 0.7f;
-    float b = g->onground ? -a : -0.4f;
+    float a = r->onground ? sinf(t * 20.0f) * 0.9f : 0.7f;
+    float b = r->onground ? -a : -0.4f;
 
-    if (g->wings_t > 0) {
+    if (r->wings_t > 0) {
         float flap = sinf(t * 14.0f) * 8.0f;
         Color wing = Fade(pu_color(PU_WINGS), 0.9f);
         tri2((Vector2){ hx - 4, top + 20 }, (Vector2){ hx - 30, top + 4 + flap }, (Vector2){ hx - 22, top + 28 }, wing);
@@ -384,17 +440,14 @@ static void draw_runner(const Run *g) {
 
     DrawLineEx((Vector2){ hx, hip }, (Vector2){ hx + sinf(b) * 11, hip + cosf(b) * 11 }, 5, pants);
     DrawLineEx((Vector2){ hx, top + 21 }, (Vector2){ hx + sinf(a) * 10, top + 29 }, 4, skin);
-
     DrawRectangleRounded((Rectangle){ hx - 9, top + 17, 18, 18 }, 0.4f, 6, shirt);
     DrawCircleV((Vector2){ hx, top + 9 }, 9, skin);
     DrawLineEx((Vector2){ hx - 4, top + 15 }, (Vector2){ hx - 26, top + 15 + sinf(t * 14.0f) * 5.0f }, 4, scarf);
-
     DrawLineEx((Vector2){ hx, hip }, (Vector2){ hx + sinf(a) * 11, hip + cosf(a) * 11 }, 5, pants);
     DrawLineEx((Vector2){ hx, top + 21 }, (Vector2){ hx + sinf(b) * 10, top + 29 }, 4, skin);
 }
 
 static void draw_world(const Run *g) {
-
     for (int i = 0; i < MAXP; i++) {
         const Plat *q = &g->pl[i];
         if (q->x > SW + 40 || q->x + q->w < -40) continue;
@@ -439,21 +492,23 @@ static void draw_world(const Run *g) {
         DrawLineEx((Vector2){ x, y }, (Vector2){ x + 50.0f + g->speed * 0.06f, y }, 2, Fade(WHITE, 0.15f));
     }
 
-    if (!g->dead) {
+    for (int w = 0; w < g->players; w++) {
+        const Runner *r = &g->r[w];
+        if (r->dead) continue;
 
-        if (g->dash_t > 0)
+        if (g->dash_t > 0 && w == 0)
             for (int i = 0; i < 6; i++) {
                 float len = 40.0f + (float)((i * 37) % 50);
-                float y = g->feet - 8.0f - i * 7.0f;
-                float x = RUN_X - 6.0f - fmodf(g->runtime * 600.0f + i * 53.0f, 60.0f);
+                float y = r->feet - 8.0f - i * 7.0f;
+                float x = r->x - 6.0f - fmodf(g->runtime * 600.0f + i * 53.0f, 60.0f);
                 DrawLineEx((Vector2){ x, y }, (Vector2){ x - len, y }, 3, Fade(pu_color(PU_DASH), 0.55f));
             }
 
-        if (!(g->invuln_t > 0 && ((int)(g->runtime * 20.0f) & 1)))
-            draw_runner(g);
+        if (!(r->invuln_t > 0 && ((int)(g->runtime * 20.0f) & 1)))
+            draw_runner(g, r, w);
 
-        if (g->shield) {
-            Vector2 c = { RUN_X + RUN_W / 2, g->feet - 24 };
+        if (r->shield) {
+            Vector2 c = { r->x + RUN_W / 2, r->feet - 24 };
             float pulse = 1.0f + 0.05f * sinf(g->runtime * 8.0f);
             DrawCircleV(c, 34.0f * pulse, Fade(pu_color(PU_SHIELD), 0.22f));
             DrawCircleLines((int)c.x, (int)c.y, 34.0f * pulse, Fade(WHITE, 0.8f));
@@ -468,17 +523,36 @@ static void draw_world(const Run *g) {
     fx_update_draw();
 }
 
-static void draw_effects_hud(const Run *g) {
+static void draw_effects_hud(const Run *g, int who) {
+    const Runner *r = &g->r[who];
+    int solo = (g->players == 1);
     int types[5]  = { PU_SHIELD, PU_DASH, PU_SLOW, PU_WINGS, PU_X2 };
-    float left[5] = { g->shield ? 1.0f : 0.0f, g->dash_t / DASH_TIME, g->slow_t / SLOW_TIME,
-                      g->wings_t / WINGS_TIME, g->x2_t / X2_TIME };
+    float left[5] = { r->shield ? 1.0f : 0.0f, solo ? g->dash_t / DASH_TIME : 0.0f,
+                      solo ? g->slow_t / SLOW_TIME : 0.0f, r->wings_t / WINGS_TIME, r->x2_t / X2_TIME };
     int y = 112;
     for (int i = 0; i < 5; i++) {
         if (left[i] <= 0) continue;
-        draw_pickup_icon(types[i], 34, (float)y, 12.0f);
-        DrawRectangle(58, y - 4, 90, 8, Fade(BLACK, 0.45f));
-        DrawRectangle(58, y - 4, (int)(90.0f * left[i]), 8, pu_color(types[i]));
+        if (who == 0) {
+            draw_pickup_icon(types[i], 34, (float)y, 12.0f);
+            DrawRectangle(58, y - 4, 90, 8, Fade(BLACK, 0.45f));
+            DrawRectangle(58, y - 4, (int)(90.0f * left[i]), 8, pu_color(types[i]));
+        } else {
+            draw_pickup_icon(types[i], SW - 34, (float)y, 12.0f);
+            DrawRectangle(SW - 148, y - 4, 90, 8, Fade(BLACK, 0.45f));
+            DrawRectangle(SW - 58 - (int)(90.0f * left[i]), y - 4, (int)(90.0f * left[i]), 8, pu_color(types[i]));
+        }
         y += 34;
+    }
+}
+
+static void draw_popups(const Run *g) {
+    for (int w = 0; w < g->players; w++) {
+        const Runner *r = &g->r[w];
+        if (r->popup_t <= 0 || r->dead) continue;
+        const char *nm = pu_name(r->popup);
+        int tw = MeasureText(nm, 24);
+        DrawText(nm, (int)(r->x + RUN_W / 2 - tw / 2.0f), (int)(r->feet - 95.0f - (1.0f - r->popup_t) * 34.0f),
+                 24, Fade(pu_color(r->popup), r->popup_t));
     }
 }
 
@@ -487,8 +561,13 @@ void game_parkour(Player *p) {
     Run g;
     int newbest = 0;
 
-    reset_run(&g);
     gfx_open("Parkour");
+    int players = gfx_pick_players("PARKOUR", "UP jump, DOWN slide", "W jump, S slide");
+    if (!players) {
+        CloseWindow();
+        return;
+    }
+    reset_run(&g, players);
 
     Camera2D cam;
     cam.offset = (Vector2){ SW / 2.0f, SH / 2.0f };
@@ -500,20 +579,33 @@ void game_parkour(Player *p) {
         float dt = GetFrameTime();
         if (dt > 0.033f) dt = 0.033f;
 
-        if (IsKeyPressed(KEY_R)) { reset_run(&g); newbest = 0; }
-        if (!g.dead) {
+        if (IsKeyPressed(KEY_R)) { reset_run(&g, players); newbest = 0; }
+        if (IsKeyPressed(KEY_M)) {
+            int m = gfx_pick_players("PARKOUR", "UP jump, DOWN slide", "W jump, S slide");
+            if (!m) break;
+            players = m;
+            reset_run(&g, players);
+            newbest = 0;
+        }
+
+        PlayerInput in1 = { 0, 0 }, in2 = { 0, 0 };
+        read_player1_input(&in1, players);
+        read_player2_input(&in2);
+
+        if (!all_dead(&g)) {
             update_effects(&g, dt);
             float world_dt = (g.slow_t > 0) ? dt * 0.6f : dt;
-            update_run(&g, world_dt);
+            update_players(&g, &in1, &in2, world_dt);
         }
         update_dust(&g, dt);
         if (g.shake > 0) { g.shake -= 40.0f * dt; if (g.shake < 0) g.shake = 0; }
 
-        int meters = (int)(g.score_px / 40.0f);
-        if (g.dead && !g.saved) {
+        int m1 = (int)(g.r[0].score_px / 40.0f);
+        int m2 = (int)(g.r[1].score_px / 40.0f);
+        if (players == 1 && g.r[0].dead && !g.saved) {
             g.saved = 1;
-            lb_submit("parkour", p->name, meters, 0);
-            if (meters > best) { best = meters; newbest = 1; }
+            lb_submit("parkour", p->name, m1, 0);
+            if (m1 > best) { best = m1; newbest = 1; }
         }
 
         BeginDrawing();
@@ -529,35 +621,51 @@ void game_parkour(Player *p) {
         draw_world(&g);
         EndMode2D();
 
-        if (g.slow_t > 0 && !g.dead)
+        if (g.slow_t > 0 && !all_dead(&g))
             DrawRectangle(0, 0, SW, SH, Fade(pu_color(PU_SLOW), 0.14f));
 
-        gfx_topbar("PARKOUR", "SPACE jump (x2) | DOWN slide | R restart | TAB top 5 | ESC hub");
-        gfx_text_center(TextFormat("%d m", meters), SW / 2, 66, 40, RAYWHITE);
-        if (g.x2_t > 0) DrawText("x2", SW / 2 + 70, 72, 28, pu_color(PU_X2));
-        DrawText(TextFormat("Best %d m", best), 20, 70, 20, LIGHTGRAY);
-        DrawText(TextFormat("Speed %d", (int)g.speed), SW - 140, 70, 20, LIGHTGRAY);
-        if (!g.dead) draw_effects_hud(&g);
-
-        if (g.popup_t > 0 && !g.dead) {
-            const char *nm = pu_name(g.popup);
-            int w = MeasureText(nm, 26);
-            DrawText(nm, (int)(RUN_X + RUN_W / 2 - w / 2.0f), (int)(g.feet - 90.0f - (1.0f - g.popup_t) * 34.0f),
-                     26, Fade(pu_color(g.popup), g.popup_t));
+        if (players == 1) {
+            gfx_topbar("PARKOUR", "SPACE/UP jump (x2) | DOWN slide | R restart | M mode | TAB top 5 | ESC hub");
+            gfx_text_center(TextFormat("%d m", m1), SW / 2, 66, 40, RAYWHITE);
+            if (g.r[0].x2_t > 0) DrawText("x2", SW / 2 + 70, 72, 28, pu_color(PU_X2));
+            DrawText(TextFormat("Best %d m", best), 20, 70, 20, LIGHTGRAY);
+            DrawText(TextFormat("Speed %d", (int)g.speed), SW - 140, 70, 20, LIGHTGRAY);
+            if (!g.r[0].dead) draw_effects_hud(&g, 0);
+        } else {
+            gfx_topbar("PARKOUR", "P1 UP/DOWN | P2 W/S | R restart | M mode | ESC hub");
+            gfx_text_shadow(TextFormat("P1  %d m%s", m1, g.r[0].dead ? "  OUT" : ""), 20, 66, 28, SHIRT[0]);
+            const char *t2 = TextFormat("P2  %d m%s", m2, g.r[1].dead ? "  OUT" : "");
+            gfx_text_shadow(t2, SW - MeasureText(t2, 28) - 20, 66, 28, SHIRT[1]);
+            for (int w = 0; w < 2; w++)
+                if (!g.r[w].dead) draw_effects_hud(&g, w);
         }
 
-        if (g.runtime < 6.0f && !g.dead) {
-            gfx_text_center("SPACE = jump (again in the air = double jump)    DOWN = slide", SW / 2, SH - 78, 22, RAYWHITE);
-            gfx_text_center("Grab the glowing orbs for powerups!", SW / 2, SH - 46, 22, GOLD);
+        draw_popups(&g);
+
+        if (g.runtime < 6.0f && !all_dead(&g)) {
+            if (players == 1) {
+                gfx_text_center("SPACE = jump (again in the air = double jump)    DOWN = slide", SW / 2, SH - 78, 22, RAYWHITE);
+                gfx_text_center("Grab the glowing orbs for powerups!", SW / 2, SH - 46, 22, GOLD);
+            } else {
+                gfx_text_center("P1: UP = jump (twice = double jump), DOWN = slide     P2: W = jump, S = slide", SW / 2, SH - 78, 20, RAYWHITE);
+                gfx_text_center("Last runner standing wins. Grab the orbs!", SW / 2, SH - 46, 22, GOLD);
+            }
         }
 
-        if (g.dead) {
+        if (all_dead(&g)) {
             DrawRectangle(0, 0, SW, SH, Fade(BLACK, 0.55f));
-            gfx_panel((Rectangle){ SW / 2 - 210, SH / 2 - 100, 420, 200 }, (Color){ 25, 28, 50, 245 });
-            gfx_text_center("CRASHED!", SW / 2, SH / 2 - 78, 44, RED);
-            gfx_text_center(TextFormat("You ran %d m", meters), SW / 2, SH / 2 - 20, 30, RAYWHITE);
-            if (newbest) gfx_text_center("NEW BEST!", SW / 2, SH / 2 + 22, 24, GOLD);
-            gfx_text_center("press R to run again", SW / 2, SH / 2 + 60, 20, LIGHTGRAY);
+            gfx_panel((Rectangle){ SW / 2 - 220, SH / 2 - 105, 440, 210 }, (Color){ 25, 28, 50, 245 });
+            if (players == 1) {
+                gfx_text_center("CRASHED!", SW / 2, SH / 2 - 82, 44, RED);
+                gfx_text_center(TextFormat("You ran %d m", m1), SW / 2, SH / 2 - 24, 30, RAYWHITE);
+                if (newbest) gfx_text_center("NEW BEST!", SW / 2, SH / 2 + 18, 24, GOLD);
+            } else {
+                const char *msg = (m1 > m2) ? "PLAYER 1 WINS" : (m2 > m1) ? "PLAYER 2 WINS" : "IT'S A DRAW";
+                Color col = (m1 > m2) ? SHIRT[0] : (m2 > m1) ? SHIRT[1] : RAYWHITE;
+                gfx_text_center(msg, SW / 2, SH / 2 - 82, 40, col);
+                gfx_text_center(TextFormat("P1 %d m     P2 %d m", m1, m2), SW / 2, SH / 2 - 24, 28, RAYWHITE);
+            }
+            gfx_text_center("R run again    M mode", SW / 2, SH / 2 + 60, 20, LIGHTGRAY);
         }
 
         lb_overlay("parkour", 0, p->name);

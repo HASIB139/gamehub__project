@@ -58,3 +58,23 @@ void fx_update_draw(void) {
         DrawCircleV(parts[i].pos, parts[i].size, Fade(parts[i].col, parts[i].life / 0.6f));
     }
 }
+
+int gfx_pick_players(const char *game, const char *p1keys, const char *p2keys) {
+    while (!WindowShouldClose()) {
+        if (IsKeyPressed(KEY_ONE) || IsKeyPressed(KEY_KP_1)) return 1;
+        if (IsKeyPressed(KEY_TWO) || IsKeyPressed(KEY_KP_2)) return 2;
+
+        BeginDrawing();
+        gfx_background((Color){ 18, 24, 40, 255 }, (Color){ 8, 10, 20, 255 });
+        gfx_topbar(game, "ESC hub");
+        gfx_panel((Rectangle){ SW / 2 - 310, 150, 620, 360 }, (Color){ 25, 28, 50, 235 });
+        gfx_text_center("HOW MANY PLAYERS?", SW / 2, 180, 40, GOLD);
+        gfx_text_center("1   one player", SW / 2, 260, 32, RAYWHITE);
+        gfx_text_center("2   two players on this keyboard", SW / 2, 310, 32, RAYWHITE);
+        DrawText(TextFormat("Player 1:  %s", p1keys), SW / 2 - 280, 390, 22, (Color){ 255, 150, 40, 255 });
+        DrawText(TextFormat("Player 2:  %s", p2keys), SW / 2 - 280, 430, 22, (Color){ 70, 170, 255, 255 });
+        gfx_text_center("press 1 or 2", SW / 2, 470, 20, LIGHTGRAY);
+        EndDrawing();
+    }
+    return 0;
+}
